@@ -74,7 +74,6 @@ struct RuleEditorView: View {
     /// Whether blockers use the static `blockerLabel` instead of mirroring the
     /// source event name. New rules default to mirroring the source name.
     @State private var usePlaceholder: Bool = false
-    @State private var allowChaining = false
 
     // MARK: - Calendar Data
 
@@ -122,7 +121,6 @@ struct RuleEditorView: View {
             _windowDays = State(initialValue: rule.windowDays)
             _blockerLabel = State(initialValue: rule.blockerLabel)
             _usePlaceholder = State(initialValue: rule.usePlaceholder)
-            _allowChaining = State(initialValue: rule.allowChaining)
         }
     }
 
@@ -195,18 +193,23 @@ struct RuleEditorView: View {
 
     var body: some View {
         Form {
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(isEditMode ? "Refine your calendar connection" : "Share your availability")
+                        .font(.title2.weight(.semibold))
+                    Text("Events on the source calendar create matching blocks on the destination.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
             calendarSection
             configurationSection
-            Section("Sync behavior") {
-                Toggle("Include blocks from other rules", isOn: $allowChaining)
-                Text("When off, the rule copies only original events. Existing chained copies in the sync window are removed on the next sync.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
             validationSection
         }
         .formStyle(.grouped)
         .navigationTitle(navigationTitle)
-        .frame(minWidth: 420, idealWidth: 480, minHeight: 320)
+        .frame(minWidth: 520, idealWidth: 570, minHeight: 580)
+        .controlSize(.regular)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") {
@@ -244,13 +247,13 @@ struct RuleEditorView: View {
     /// (the selection values are set before the async load completes).
     @ViewBuilder
     private var calendarSection: some View {
-        Section("Calendars") {
+        Section("Calendar connection") {
             if !accessGranted && accessError == nil {
                 // Calendar data is still loading; defer picker rendering.
                 ProgressView("Loading calendars…")
             } else {
                 // Source calendar picker: all calendars
-                Picker("Source Calendar", selection: $sourceCalendarID) {
+                Picker("From", selection: $sourceCalendarID) {
                     Text("Select a calendar")
                         .tag("")
 
@@ -264,8 +267,10 @@ struct RuleEditorView: View {
                     }
                 }
 
+                .disabled(isEditMode)
+
                 // Target calendar picker: only writable calendars
-                Picker("Target Calendar", selection: $targetCalendarID) {
+                Picker("To", selection: $targetCalendarID) {
                     Text("Select a calendar")
                         .tag("")
 
@@ -277,6 +282,13 @@ struct RuleEditorView: View {
                             }
                         }
                     }
+                }
+
+                .disabled(isEditMode)
+
+                if isEditMode {
+                    Text("To change the connected calendars, create a new rule.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
 
                 // Inline error when source and target are the same
@@ -292,8 +304,8 @@ struct RuleEditorView: View {
     /// Section for rule title, window days input, and blocker label text field.
     @ViewBuilder
     private var configurationSection: some View {
-        Section("Configuration") {
-            TextField("Rule Title", text: $ruleTitle)
+        Section("Rule details") {
+            TextField("Rule name", text: $ruleTitle)
                 .textFieldStyle(.roundedBorder)
                 .focused($focusedField, equals: .title)
 
@@ -305,7 +317,7 @@ struct RuleEditorView: View {
             }
 
             HStack {
-                Text("Window")
+                Text("Look ahead")
                 Spacer()
                 TextField("", value: $windowDays, format: .number)
                     .textFieldStyle(.roundedBorder)
@@ -318,6 +330,9 @@ struct RuleEditorView: View {
                     .foregroundStyle(.secondary)
             }
 
+        }
+
+        Section("Event privacy") {
             Toggle("Use a fixed placeholder", isOn: $usePlaceholder)
                 .onChange(of: usePlaceholder) { _, isOn in
                     // Suggest a default placeholder the first time it's enabled.
@@ -343,6 +358,7 @@ struct RuleEditorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+
     }
 
     /// Section displaying access errors or save errors, if any.
@@ -397,7 +413,6 @@ struct RuleEditorView: View {
             updated.windowDays = windowDays
             updated.blockerLabel = blockerLabel
             updated.usePlaceholder = usePlaceholder
-            updated.allowChaining = allowChaining
             updated.updatedAt = Date()
 
             // Source and target are immutable (let properties), so they cannot
@@ -427,8 +442,7 @@ struct RuleEditorView: View {
                 targetCalendarIdentifier: targetCalendarID,
                 windowDays: windowDays,
                 blockerLabel: blockerLabel,
-                usePlaceholder: usePlaceholder,
-                allowChaining: allowChaining
+                usePlaceholder: usePlaceholder
             )
 
             do {
