@@ -5,9 +5,12 @@ import Foundation
 public enum RuleStoreError: Error, LocalizedError {
     /// The requested rule was not found in the store.
     case ruleNotFound(UUID)
+    case unreadable(Error)
 
     public var errorDescription: String? {
         switch self {
+        case .unreadable(let error):
+            return "Saved mirror rules could not be read; no changes were made. \(error.localizedDescription)"
         case .ruleNotFound(let id):
             return "No rule found with id \(id.uuidString)."
         }
@@ -25,15 +28,25 @@ public final class RuleStore: @unchecked Sendable {
     public static let suiteName = "com.gravitek.calmirror"
 
     private let defaults: UserDefaults
+    private let mutationLockURL: URL?
 
     public init() {
         // Use shared suite; fall back to standard if suite creation fails
         self.defaults = UserDefaults(suiteName: RuleStore.suiteName) ?? .standard
+        self.mutationLockURL = nil
     }
 
     /// For testing: inject a custom UserDefaults instance.
-    internal init(defaults: UserDefaults) {
+    internal init(defaults: UserDefaults, mutationLockURL: URL? = nil) {
         self.defaults = defaults
+        self.mutationLockURL = mutationLockURL
+    }
+
+    private func acquireMutationLock() throws -> ProcessMutationLock {
+        if let mutationLockURL {
+            return try ProcessMutationLock.acquire(at: mutationLockURL, wait: false)
+        }
+        return try ProcessMutationLock.acquire(wait: false)
     }
 
     // MARK: - Read Operations
@@ -45,13 +58,17 @@ public final class RuleStore: @unchecked Sendable {
     ///
     /// - Returns: The array of persisted mirror rules, or an empty array.
     public func loadRules() -> [MirrorRule] {
+        (try? loadRulesChecked()) ?? []
+    }
+
+    public func loadRulesChecked() throws -> [MirrorRule] {
         guard let data = defaults.data(forKey: MirrorRule.userDefaultsKey) else {
             return []
         }
         do {
             return try JSONDecoder().decode([MirrorRule].self, from: data)
         } catch {
-            return []
+            throw RuleStoreError.unreadable(error)
         }
     }
 
@@ -65,16 +82,16 @@ public final class RuleStore: @unchecked Sendable {
 
     // MARK: - Write Operations
 
-    /// Encodes and persists the given array of rules to UserDefaults.
-    ///
-    /// Replaces the entire stored rule list with the provided array.
-    /// Uses JSON encoding via `Codable` for cross-process compatibility.
-    ///
-    /// - Parameter rules: The complete array of rules to persist.
-    public func saveRules(_ rules: [MirrorRule]) {
-        guard let data = try? JSONEncoder().encode(rules) else {
-            return
-        }
+    /// Encodes and persists the given array of rules to UserDefaults under the
+    /// shared mutation lock. Lock and encoding failures are reported to callers.
+    public func saveRules(_ rules: [MirrorRule]) throws {
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
+        try persistRules(rules)
+    }
+
+    private func persistRules(_ rules: [MirrorRule]) throws {
+        let data = try JSONEncoder().encode(rules)
         defaults.set(data, forKey: MirrorRule.userDefaultsKey)
     }
 
@@ -86,6 +103,8 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter rule: The new rule to add.
     /// - Throws: `MirrorRule.ValidationError` if the rule's configuration is invalid.
     public func addRule(_ rule: MirrorRule) throws {
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
         if let validationError = MirrorRule.validate(
             title: rule.title,
             sourceCalendarIdentifier: rule.sourceCalendarIdentifier,
@@ -97,9 +116,9 @@ public final class RuleStore: @unchecked Sendable {
             throw validationError
         }
 
-        var rules = loadRules()
+        var rules = try loadRulesChecked()
         rules.append(rule)
-        saveRules(rules)
+        try persistRules(rules)
     }
 
     /// Replaces an existing rule with an updated version, matched by id.
@@ -110,12 +129,14 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter rule: The updated rule (must have the same id as an existing rule).
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     public func updateRule(_ rule: MirrorRule) throws {
-        var rules = loadRules()
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
+        var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == rule.id }) else {
             throw RuleStoreError.ruleNotFound(rule.id)
         }
         rules[index] = rule
-        saveRules(rules)
+        try persistRules(rules)
     }
 
     /// Removes a rule by its identifier and returns the removed rule.
@@ -125,12 +146,19 @@ public final class RuleStore: @unchecked Sendable {
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     @discardableResult
     public func removeRule(id: UUID) throws -> MirrorRule {
-        var rules = loadRules()
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
+        return try removeRuleWithoutLock(id: id)
+    }
+
+    /// Removes a rule after the public mutation entry point acquires the lock.
+    private func removeRuleWithoutLock(id: UUID) throws -> MirrorRule {
+        var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
         }
         let removed = rules.remove(at: index)
-        saveRules(rules)
+        try persistRules(rules)
         return removed
     }
 
@@ -163,14 +191,16 @@ public final class RuleStore: @unchecked Sendable {
         syncRecordStore: SyncRecordStore,
         calendarService: CalendarService
     ) throws -> (rule: MirrorRule, blockersRemoved: Int) {
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
 
         // Verify the rule exists before performing cleanup.
-        guard let _ = loadRules().first(where: { $0.id == id }) else {
+        guard let _ = try loadRulesChecked().first(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
         }
 
         // Step 1: Load sync records for this rule.
-        let records = syncRecordStore.loadRecords(for: id)
+        let records = try syncRecordStore.loadRecordsChecked(for: id)
 
         // Step 2: Delete each managed blocker event from EventKit.
         var blockersRemoved = 0
@@ -198,7 +228,7 @@ public final class RuleStore: @unchecked Sendable {
         try syncRecordStore.deleteRecords(for: id)
 
         // Step 5: Remove the rule from UserDefaults.
-        let removedRule = try removeRule(id: id)
+        let removedRule = try removeRuleWithoutLock(id: id)
 
         return (rule: removedRule, blockersRemoved: blockersRemoved)
     }
@@ -236,13 +266,15 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter id: The UUID of the rule to enable.
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     public func enableRule(id: UUID) throws {
-        var rules = loadRules()
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
+        var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
         }
         rules[index].isEnabled = true
         rules[index].updatedAt = Date()
-        saveRules(rules)
+        try persistRules(rules)
     }
 
     /// Disables a rule by setting `isEnabled` to `false` and updating the timestamp.
@@ -250,12 +282,14 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter id: The UUID of the rule to disable.
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     public func disableRule(id: UUID) throws {
-        var rules = loadRules()
+        let lock = try acquireMutationLock()
+        defer { lock.release() }
+        var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
         }
         rules[index].isEnabled = false
         rules[index].updatedAt = Date()
-        saveRules(rules)
+        try persistRules(rules)
     }
 }

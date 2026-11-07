@@ -72,6 +72,34 @@ final class RuleStoreTests: XCTestCase {
         XCTAssertTrue(rules.isEmpty, "Expected no rules in a fresh UserDefaults instance")
     }
 
+    func testCheckedReadRefusesToTreatCorruptRulesAsEmptyForMutation() throws {
+        let original = Data("{broken".utf8)
+        testDefaults.set(original, forKey: MirrorRule.userDefaultsKey)
+        XCTAssertThrowsError(try store.loadRulesChecked())
+        XCTAssertThrowsError(try store.addRule(makeRule()))
+        XCTAssertEqual(testDefaults.data(forKey: MirrorRule.userDefaultsKey), original)
+    }
+
+    func testBusyMutationLockRejectsRuleChangeAndPreservesSavedState() throws {
+        let lockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("mutation.lock")
+        defer { try? FileManager.default.removeItem(at: lockURL.deletingLastPathComponent()) }
+        let isolatedStore = RuleStore(defaults: testDefaults, mutationLockURL: lockURL)
+        let rule = makeRule(isEnabled: true)
+        try isolatedStore.addRule(rule)
+        let originalData = try XCTUnwrap(testDefaults.data(forKey: MirrorRule.userDefaultsKey))
+
+        let lock = try ProcessMutationLock.acquire(at: lockURL, wait: true)
+        defer { lock.release() }
+
+        XCTAssertThrowsError(try isolatedStore.disableRule(id: rule.id)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Another CalMirror operation"))
+        }
+        XCTAssertEqual(testDefaults.data(forKey: MirrorRule.userDefaultsKey), originalData)
+        XCTAssertTrue(try isolatedStore.loadRulesChecked().first?.isEnabled == true)
+    }
+
     /// T018-2: Adding a valid rule persists it so that subsequent loads return it.
     func testAddAndLoadRule() throws {
         let rule = makeRule()

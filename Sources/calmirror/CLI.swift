@@ -315,7 +315,7 @@ extension CalmMirror.Rules {
 
         func run() throws {
             let store = RuleStore()
-            let rules = store.loadRules()
+            let rules = try store.loadRulesChecked()
 
             if rules.isEmpty {
                 if json {
@@ -442,6 +442,9 @@ extension CalmMirror.Rules {
         @Flag(name: .long, help: "Use a fixed placeholder label instead of mirroring the source event name")
         var usePlaceholder: Bool = false
 
+        @Flag(name: .long, help: "Include CalMirror blocks from other rules; origin loop protection still applies")
+        var allowChaining = false
+
         @Option(name: .long, help: "Fixed label for blocker events (required with --use-placeholder; ignored otherwise)")
         var label: String = ""
 
@@ -497,7 +500,8 @@ extension CalmMirror.Rules {
                 targetCalendarIdentifier: target,
                 windowDays: window,
                 blockerLabel: label,
-                usePlaceholder: usePlaceholder
+                usePlaceholder: usePlaceholder,
+                allowChaining: allowChaining
             )
 
             let store = RuleStore()
@@ -567,7 +571,7 @@ extension CalmMirror.Rules {
                 if result.blockersRemoved > 0 {
                     print("Cleaned up \(result.blockersRemoved) blocker event\(result.blockersRemoved == 1 ? "" : "s") from target calendar.")
                 }
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {
@@ -610,7 +614,7 @@ extension CalmMirror.Rules {
                 let rule = store.rule(for: ruleID)
                 let label = rule?.title ?? "unknown"
                 print("Rule enabled: \(shortID(ruleID.uuidString)) (\"\(label)\")")
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {
@@ -655,7 +659,7 @@ extension CalmMirror.Rules {
                 let label = rule?.title ?? "unknown"
                 print("Rule disabled: \(shortID(ruleID.uuidString)) (\"\(label)\")")
                 print("Existing blockers are preserved. Use 'calmirror rules remove' to also clean up blockers.")
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {
@@ -718,9 +722,12 @@ extension CalmMirror {
             // allowing the current rule to finish before exiting.
             installSignalHandlers()
 
+            let mutationLock = try ProcessMutationLock.acquire(wait: true)
+            defer { mutationLock.release() }
+
             // Load rules from the rule store.
             let ruleStore = RuleStore()
-            let allRules = ruleStore.loadRules()
+            let allRules = try ruleStore.loadRulesChecked()
 
             // If --rule is provided, filter to that single rule.
             let rulesToSync: [MirrorRule]
@@ -1193,7 +1200,7 @@ extension CalmMirror {
 
             // 2. Load rules and compute counts.
             let ruleStore = RuleStore()
-            let rules = ruleStore.loadRules()
+            let rules = try ruleStore.loadRulesChecked()
             let totalRules = rules.count
             let enabledRules = rules.filter(\.isEnabled).count
             let disabledRules = totalRules - enabledRules
