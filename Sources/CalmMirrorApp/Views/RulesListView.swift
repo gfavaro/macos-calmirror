@@ -162,7 +162,7 @@ struct RulesListView: View {
                  targetAccount: target?.source?.title ?? "Check calendar access",
                  targetColor: calendarColor(target),
                  days: rule.windowDays, isEnabled: rule.isEnabled,
-                 isPrivate: rule.usePlaceholder, allowsChaining: false) {
+                 isPrivate: rule.usePlaceholder, allowsChaining: rule.allowChaining) {
             Toggle("Enable \(rule.title)", isOn: toggleBinding(for: rule))
                 .toggleStyle(.switch).controlSize(.small).labelsHidden()
             Menu {
@@ -284,7 +284,7 @@ struct RulesListView: View {
     /// Reloads the full rule list from the store into local state.
     private func refreshRules() {
         do {
-            rules = ruleStore.loadRules()
+            rules = try ruleStore.loadRulesChecked()
             rulesReadError = nil
         } catch {
             rulesReadError = error.localizedDescription

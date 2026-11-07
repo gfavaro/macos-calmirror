@@ -338,8 +338,8 @@ struct LogsView: View {
         loadError = nil
         let result = await Task.detached(priority: .utility) { () -> Result<([MirrorRule], [SyncLog]), NSError> in
             do {
-                let loadedRules = RuleStore().loadRules()
-                let loadedLogs = try SyncLogStore().loadLogs().sorted { $0.timestamp > $1.timestamp }
+                let loadedRules = try RuleStore().loadRulesChecked()
+                let loadedLogs = try SyncLogStore().loadLogsChecked().sorted { $0.timestamp > $1.timestamp }
                 return .success((loadedRules, loadedLogs))
             } catch { return .failure(NSError(domain: "CalMirror.LogRead", code: 1,
                 userInfo: [NSLocalizedDescriptionKey: error.localizedDescription])) }

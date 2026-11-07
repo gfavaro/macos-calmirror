@@ -62,6 +62,7 @@ private struct ContentView: View {
     private enum Tab: Hashable {
         case rules
         case logs
+        case schedule
     }
 
     /// Shared coordinator for on-demand syncs, injected into the environment
@@ -80,6 +81,8 @@ private struct ContentView: View {
                             .tag(Tab.rules)
                         Label("Sync Activity", systemImage: "clock.arrow.circlepath")
                             .tag(Tab.logs)
+                        Label("Sync Schedule", systemImage: "timer")
+                            .tag(Tab.schedule)
                     }
                 }
                 .listStyle(.sidebar)
@@ -101,6 +104,7 @@ private struct ContentView: View {
                     switch selectedTab {
                     case .rules: RulesListView()
                     case .logs: LogsView()
+                    case .schedule: SyncScheduleView()
                     }
                 }
                 Divider()

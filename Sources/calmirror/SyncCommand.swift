@@ -56,9 +56,15 @@ extension CalmMirror {
             // allowing the current rule to finish before exiting.
             installSignalHandlers()
 
+            // Hold the stable cross-process lock across rule loading, calendar
+            // writes and mapping persistence so independent CLI invocations
+            // cannot execute as concurrent writers.
+            let mutationLock = try ProcessMutationLock.acquire(wait: true)
+            defer { mutationLock.release() }
+
             // Load rules from the rule store.
             let ruleStore = RuleStore()
-            let allRules = ruleStore.loadRules()
+            let allRules = try ruleStore.loadRulesChecked()
 
             // If --rule is provided, filter to that single rule.
             let rulesToSync: [MirrorRule]

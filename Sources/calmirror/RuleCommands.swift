@@ -60,7 +60,7 @@ extension CalmMirror.Rules {
 
         func run() throws {
             let store = RuleStore()
-            let rules = store.loadRules()
+            let rules = try store.loadRulesChecked()
 
             if rules.isEmpty {
                 if json {
@@ -102,7 +102,7 @@ extension CalmMirror.Rules {
             // Header
             print(formatRow([
                 ("ID", 10), ("TITLE", 24), ("SOURCE", 10),
-                ("TARGET", 10), ("WINDOW", 8), ("MODE", 8), ("STATUS", 0)
+                ("TARGET", 10), ("WINDOW", 8), ("MODE", 8), ("CHAIN", 8), ("STATUS", 0)
             ]))
 
             for rule in rules {
@@ -113,6 +113,7 @@ extension CalmMirror.Rules {
                     (shortID(rule.targetCalendarIdentifier), 10),
                     ("\(rule.windowDays)d", 8),
                     (rule.usePlaceholder ? "fixed" : "source", 8),
+                    (rule.allowChaining ? "on" : "off", 8),
                     (rule.isEnabled ? "enabled" : "disabled", 0)
                 ]))
             }
@@ -187,6 +188,9 @@ extension CalmMirror.Rules {
         @Flag(name: .long, help: "Use a fixed placeholder label instead of mirroring the source event name")
         var usePlaceholder: Bool = false
 
+        @Flag(name: .long, help: "Include CalMirror-generated blocks as sources, allowing rules to chain")
+        var allowChaining: Bool = false
+
         @Option(name: .long, help: "Fixed label for blocker events (required with --use-placeholder; ignored otherwise)")
         var label: String = ""
 
@@ -242,7 +246,8 @@ extension CalmMirror.Rules {
                 targetCalendarIdentifier: target,
                 windowDays: window,
                 blockerLabel: label,
-                usePlaceholder: usePlaceholder
+                usePlaceholder: usePlaceholder,
+                allowChaining: allowChaining
             )
 
             let store = RuleStore()
@@ -262,6 +267,7 @@ extension CalmMirror.Rules {
             print("  Source: \(sourceCal.title) (\(sourceAccount))")
             print("  Target: \(targetCal.title) (\(targetAccount))")
             print("  Window: \(window) days")
+            print("  Chaining: \(allowChaining ? "on" : "off")")
             if usePlaceholder {
                 print("  Title mode: fixed placeholder")
                 print("  Label:  \(label)")
@@ -312,7 +318,7 @@ extension CalmMirror.Rules {
                 if result.blockersRemoved > 0 {
                     print("Cleaned up \(result.blockersRemoved) blocker event\(result.blockersRemoved == 1 ? "" : "s") from target calendar.")
                 }
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {
@@ -355,7 +361,7 @@ extension CalmMirror.Rules {
                 let rule = store.rule(for: ruleID)
                 let label = rule?.title ?? "unknown"
                 print("Rule enabled: \(shortID(ruleID.uuidString)) (\"\(label)\")")
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {
@@ -400,7 +406,7 @@ extension CalmMirror.Rules {
                 let label = rule?.title ?? "unknown"
                 print("Rule disabled: \(shortID(ruleID.uuidString)) (\"\(label)\")")
                 print("Existing blockers are preserved. Use 'calmirror rules remove' to also clean up blockers.")
-            } catch is RuleStoreError {
+            } catch RuleStoreError.ruleNotFound(_) {
                 writeToStderr("error: rule '\(uuid)' not found.")
                 Darwin.exit(3)
             } catch {

@@ -225,7 +225,7 @@ extension CalmMirror {
 
             // 2. Load rules and compute counts.
             let ruleStore = RuleStore()
-            let rules = ruleStore.loadRules()
+            let rules = try ruleStore.loadRulesChecked()
             let totalRules = rules.count
             let enabledRules = rules.filter(\.isEnabled).count
             let disabledRules = totalRules - enabledRules
@@ -239,7 +239,7 @@ extension CalmMirror {
                 Darwin.exit(2)
             }
 
-            let lastLog = logStore.loadLogs().last
+            let lastLog = try logStore.loadLogsChecked().last
 
             // 4. Output results.
             if json {
