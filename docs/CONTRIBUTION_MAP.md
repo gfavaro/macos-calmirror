@@ -1,6 +1,8 @@
 # Contribution map
 
-The independent draft PRs target `gravitek-io/macos-calmirror:main`.
+The fork contains the complete integrated app on `main`. It builds and runs
+without waiting for upstream changes. The PRs below are optional contributions
+to `gravitek-io/macos-calmirror:main`. They are ready for review.
 
 | Change | Request | Draft PR | Local validation |
 |---|---|---|---|
@@ -13,9 +15,9 @@ The independent draft PRs target `gravitek-io/macos-calmirror:main`.
 | Calendar and planner boundary | [#25](https://github.com/gravitek-io/macos-calmirror/issues/25) | [#32](https://github.com/gravitek-io/macos-calmirror/pull/32) | 100 tests passed |
 | CLI and release contracts | [#25](https://github.com/gravitek-io/macos-calmirror/issues/25) | [#33](https://github.com/gravitek-io/macos-calmirror/pull/33) | 92 tests passed; release and contract checks passed |
 
-## Dependent drafts
+## Review history
 
-The recovery draft is [gfavaro/macos-calmirror#1](https://github.com/gfavaro/macos-calmirror/pull/1).
+The recovery review is [gfavaro/macos-calmirror#1](https://github.com/gfavaro/macos-calmirror/pull/1).
 It targets `review/sync-recovery-base` in the fork. That branch combines upstream
 PRs #26, #29, #30, #31, and #32. This keeps the recovery review limited to its
 engine and cleanup changes. It covers requests #20 and #21 and completes the
@@ -27,9 +29,9 @@ to the new UI and split CLI. It also adds the schedule page to the sidebar.
 The combined tree passed 144 tests with two opt-in cases skipped. The release
 build, metadata check, help/version snapshots, and whitespace check passed.
 
-After the independent PRs merge, rebase the dependent work onto upstream main
-and submit its remaining changes there. Visual UI checks and a real provider
-commit failure remain outside automated coverage.
+The fork can develop and release independently. Future upstream contributions
+can use these review branches as references. Visual UI checks and a real
+provider commit failure remain outside automated coverage.
 
 EventKit notification triggers remain a proposal in
 [request #18](https://github.com/gravitek-io/macos-calmirror/issues/18).
