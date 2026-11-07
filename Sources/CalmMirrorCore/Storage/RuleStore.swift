@@ -9,10 +9,10 @@ public enum RuleStoreError: Error, LocalizedError {
 
     public var errorDescription: String? {
         switch self {
-        case .unreadable(let error):
-            return "Saved mirror rules could not be read; no changes were made. \(error.localizedDescription)"
         case .ruleNotFound(let id):
             return "No rule found with id \(id.uuidString)."
+        case .unreadable(let error):
+            return "Saved mirror rules could not be read; no changes were made. \(error.localizedDescription)"
         }
     }
 }
@@ -151,7 +151,6 @@ public final class RuleStore: @unchecked Sendable {
         return try removeRuleWithoutLock(id: id)
     }
 
-    /// Removes a rule after the public mutation entry point acquires the lock.
     private func removeRuleWithoutLock(id: UUID) throws -> MirrorRule {
         var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == id }) else {
@@ -191,37 +190,73 @@ public final class RuleStore: @unchecked Sendable {
         syncRecordStore: SyncRecordStore,
         calendarService: CalendarService
     ) throws -> (rule: MirrorRule, blockersRemoved: Int) {
+        try removeRuleWithCleanup(id: id, syncRecordStore: syncRecordStore, calendarAccess: calendarService)
+    }
+
+    /// Internal adapter overload lets cleanup recovery be tested without EventKit.
+    @discardableResult
+    func removeRuleWithCleanup(
+        id: UUID,
+        syncRecordStore: SyncRecordStore,
+        calendarAccess: any CalendarAccess
+    ) throws -> (rule: MirrorRule, blockersRemoved: Int) {
         let lock = try acquireMutationLock()
         defer { lock.release() }
+        defer { calendarAccess.releaseEventHandles() }
 
         // Verify the rule exists before performing cleanup.
-        guard let _ = try loadRulesChecked().first(where: { $0.id == id }) else {
+        guard let rule = try loadRulesChecked().first(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
+        }
+        guard let targetCalendar = calendarAccess.calendarDescriptor(withIdentifier: rule.targetCalendarIdentifier) else {
+            throw NSError(domain: "CalMirror.RuleCleanup", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "The rule's target calendar is unavailable; cleanup was not started."
+            ])
         }
 
         // Step 1: Load sync records for this rule.
         let records = try syncRecordStore.loadRecordsChecked(for: id)
+        let otherOwners = try syncRecordStore.blockerIdentifiersOwned(byRulesOtherThan: id)
+        guard !records.contains(where: {
+            otherOwners.local.contains($0.blockerEventIdentifier)
+                || otherOwners.external.contains($0.blockerExternalIdentifier)
+        }) else {
+            throw NSError(domain: "CalMirror.RuleCleanup", code: 3, userInfo: [
+                NSLocalizedDescriptionKey: "A recorded blocker is also owned by another rule; cleanup was not started."
+            ])
+        }
 
         // Step 2: Delete each managed blocker event from EventKit.
         var blockersRemoved = 0
         for record in records {
-            if let blockerEvent = findBlockerEvent(
-                for: record,
-                calendarService: calendarService
-            ) {
-                do {
-                    try calendarService.deleteEvent(blockerEvent, commit: false)
+            do {
+                switch try calendarAccess.resolveBlocker(for: record, in: targetCalendar) {
+                case .found(let blockerEvent):
+                    try calendarAccess.deleteEvent(blockerEvent, commit: false)
                     blockersRemoved += 1
-                } catch {
-                    // Individual blocker deletion failure is non-fatal.
-                    // The blocker may have been manually deleted or the calendar removed.
+                case .missing:
+                    continue
+                case .foreign, .untagged, .ambiguous:
+                    throw NSError(domain: "CalMirror.RuleCleanup", code: 2, userInfo: [
+                        NSLocalizedDescriptionKey: "A recorded blocker could not be verified as managed in the target calendar; rule data was retained."
+                    ])
                 }
+            } catch {
+                // Resolution itself may fail after earlier deletes were staged.
+                // Reset all staged edits so another caller cannot accidentally commit them.
+                calendarAccess.discardPendingChanges()
+                throw error
             }
         }
 
         // Step 3: Commit all pending EventKit deletions in one batch.
         if blockersRemoved > 0 {
-            try calendarService.commitChanges()
+            do {
+                try calendarAccess.commitChanges()
+            } catch {
+                calendarAccess.discardPendingChanges()
+                throw error
+            }
         }
 
         // Step 4: Delete the sync record JSON file.
@@ -233,32 +268,6 @@ public final class RuleStore: @unchecked Sendable {
         return (rule: removedRule, blockersRemoved: blockersRemoved)
     }
 
-    // MARK: - Private Helpers
-
-    /// Looks up a blocker event using the sync record's stored identifiers.
-    ///
-    /// Attempts the primary device-local `eventIdentifier` first. If not found
-    /// (e.g., after Exchange re-sync), falls back to the cross-device
-    /// `calendarItemExternalIdentifier`.
-    ///
-    /// - Parameters:
-    ///   - record: The sync record containing the blocker's identifiers.
-    ///   - calendarService: The calendar service used for EventKit lookups.
-    /// - Returns: The matching `EKEvent`, or `nil` if the blocker no longer exists.
-    private func findBlockerEvent(
-        for record: SyncRecord,
-        calendarService: CalendarService
-    ) -> EKEvent? {
-        // Primary lookup: device-local identifier (fast, single-item fetch).
-        if let event = calendarService.findEvent(byIdentifier: record.blockerEventIdentifier) {
-            return event
-        }
-
-        // Fallback: cross-device external identifier (may return multiple items).
-        let items = calendarService.findEvents(byExternalIdentifier: record.blockerExternalIdentifier)
-        return items.first { $0 is EKEvent } as? EKEvent
-    }
-
     // MARK: - Toggle Operations
 
     /// Enables a rule by setting `isEnabled` to `true` and updating the timestamp.
@@ -266,15 +275,7 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter id: The UUID of the rule to enable.
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     public func enableRule(id: UUID) throws {
-        let lock = try acquireMutationLock()
-        defer { lock.release() }
-        var rules = try loadRulesChecked()
-        guard let index = rules.firstIndex(where: { $0.id == id }) else {
-            throw RuleStoreError.ruleNotFound(id)
-        }
-        rules[index].isEnabled = true
-        rules[index].updatedAt = Date()
-        try persistRules(rules)
+        try setEnabled(true, for: id)
     }
 
     /// Disables a rule by setting `isEnabled` to `false` and updating the timestamp.
@@ -282,13 +283,18 @@ public final class RuleStore: @unchecked Sendable {
     /// - Parameter id: The UUID of the rule to disable.
     /// - Throws: `RuleStoreError.ruleNotFound` if no rule with the given id exists.
     public func disableRule(id: UUID) throws {
+        try setEnabled(false, for: id)
+    }
+
+    /// Applies the shared read-modify-write sequence used by both toggle actions.
+    private func setEnabled(_ enabled: Bool, for id: UUID) throws {
         let lock = try acquireMutationLock()
         defer { lock.release() }
         var rules = try loadRulesChecked()
         guard let index = rules.firstIndex(where: { $0.id == id }) else {
             throw RuleStoreError.ruleNotFound(id)
         }
-        rules[index].isEnabled = false
+        rules[index].isEnabled = enabled
         rules[index].updatedAt = Date()
         try persistRules(rules)
     }
