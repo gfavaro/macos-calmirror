@@ -1,4 +1,3 @@
-import EventKit
 import Foundation
 
 /// Orchestrates calendar event synchronization for mirror rules.
@@ -34,7 +33,7 @@ public final class SyncEngine {
 
     // MARK: - Dependencies
 
-    private let calendarService: CalendarService
+    private let calendarService: any CalendarAccess
     private let syncRecordStore: SyncRecordStore
     private let syncLogStore: SyncLogStore
 
@@ -53,6 +52,13 @@ public final class SyncEngine {
         syncLogStore: SyncLogStore
     ) {
         self.calendarService = calendarService
+        self.syncRecordStore = syncRecordStore
+        self.syncLogStore = syncLogStore
+    }
+
+    /// Test seam for a staged in-memory calendar implementation.
+    init(calendarAccess: any CalendarAccess, syncRecordStore: SyncRecordStore, syncLogStore: SyncLogStore) {
+        self.calendarService = calendarAccess
         self.syncRecordStore = syncRecordStore
         self.syncLogStore = syncLogStore
     }
@@ -78,7 +84,7 @@ public final class SyncEngine {
         // Step 1: Validate calendars
         // ------------------------------------------------------------------
 
-        guard let sourceCalendar = calendarService.calendar(withIdentifier: rule.sourceCalendarIdentifier) else {
+        guard let sourceCalendar = calendarService.calendarDescriptor(withIdentifier: rule.sourceCalendarIdentifier) else {
             return buildErrorLog(
                 rule: rule,
                 startTime: startTime,
@@ -89,7 +95,7 @@ public final class SyncEngine {
             )
         }
 
-        guard let targetCalendar = calendarService.calendar(withIdentifier: rule.targetCalendarIdentifier) else {
+        guard let targetCalendar = calendarService.calendarDescriptor(withIdentifier: rule.targetCalendarIdentifier) else {
             return buildErrorLog(
                 rule: rule,
                 startTime: startTime,
@@ -123,28 +129,56 @@ public final class SyncEngine {
         // Step 3: Fetch source events, filter cancelled and looping ones
         // ------------------------------------------------------------------
 
-        let allSourceEvents = calendarService.fetchEvents(
-            in: sourceCalendar,
-            from: windowStart,
-            to: windowEnd
-        )
+        let allSourceEvents: [CalendarEventSnapshot]
+        do {
+            allSourceEvents = try calendarService.fetchEvents(
+                in: sourceCalendar, from: windowStart, to: windowEnd, retainHandles: false
+            )
+        } catch {
+            return buildErrorLog(rule: rule, startTime: startTime, error: SyncError(
+                code: .calendarNotFound,
+                message: "Could not read the source calendar; no calendar changes were made. \(error.localizedDescription)"
+            ))
+        }
 
-        // A blocker is never mirrored back into a calendar it derives from:
-        // with two-way rules (A→B and B→A) it would otherwise bounce between
-        // both calendars forever. Chained rules (A→B, B→C) are unaffected.
+        // Filtering before diffing also removes previously chained copies when
+        // chaining is disabled: their records become orphaned and are cleaned up.
         let sourceEvents = allSourceEvents.filter { event in
-            event.status != .canceled
-                && !BlockerNotes.wouldLoop(
-                    sourceNotes: event.notes,
-                    targetCalendarIdentifier: rule.targetCalendarIdentifier
-                )
+            !event.isCanceled && rule.acceptsSource(notes: event.notes)
         }
 
         // ------------------------------------------------------------------
         // Step 4: Load existing sync records
         // ------------------------------------------------------------------
 
-        let existingRecords = syncRecordStore.loadRecords(for: rule.id)
+        let existingRecords: [SyncRecord]
+        do {
+            existingRecords = try syncRecordStore.loadRecordsChecked(for: rule.id)
+        } catch {
+            return buildErrorLog(rule: rule, startTime: startTime, error: SyncError(
+                code: .unknown,
+                message: "Sync mappings could not be read; no calendar changes were made. \(error.localizedDescription)"
+            ))
+        }
+
+        let otherOwners: (local: Set<String>, external: Set<String>)
+        do {
+            otherOwners = try syncRecordStore.blockerIdentifiersOwned(byRulesOtherThan: rule.id)
+        } catch {
+            return buildErrorLog(rule: rule, startTime: startTime, error: SyncError(
+                code: .unknown,
+                message: "Could not verify blocker ownership across rules; no calendar changes were made. \(error.localizedDescription)"
+            ))
+        }
+        if existingRecords.contains(where: {
+            otherOwners.local.contains($0.blockerEventIdentifier)
+                || otherOwners.external.contains($0.blockerExternalIdentifier)
+        }) {
+            return buildErrorLog(rule: rule, startTime: startTime, error: SyncError(
+                code: .blockerOperationFailed,
+                message: "A blocker mapping is also owned by another rule; refusing to mutate it."
+            ))
+        }
 
         // ------------------------------------------------------------------
         // Step 5: Diff — classify each event and record
@@ -162,36 +196,36 @@ public final class SyncEngine {
 
         // A new event whose blocker (same title and time) is already present
         // in the target calendar adopts it instead of creating a duplicate.
-        var adoptableBlockers = diffResult.newEvents.isEmpty ? [:] : findAdoptableBlockers(
-            in: targetCalendar,
-            from: windowStart,
-            to: windowEnd,
-            existingRecords: existingRecords
-        )
+        let adoptableBlockers: [BlockerKey: CalendarEventSnapshot]
+        do {
+            adoptableBlockers = diffResult.newEvents.isEmpty ? [:] : try findAdoptableBlockers(
+                in: targetCalendar, from: windowStart, to: windowEnd,
+                existingRecords: existingRecords, rule: rule, otherOwners: otherOwners
+            )
+        } catch {
+            return buildErrorLog(rule: rule, startTime: startTime, error: SyncError(
+                code: .calendarNotFound,
+                message: "Could not read the target calendar; no calendar changes were made. \(error.localizedDescription)"
+            ))
+        }
+        var availableBlockers = adoptableBlockers
         var eventsToCreate: [NewEvent] = []
         var eventsToUpdate = diffResult.changedEvents
-        var createdRecords: [SyncRecord] = []
+        var adoptedRecords: [SyncRecord] = []
         let now = Date()
 
         for newItem in diffResult.newEvents {
             let event = newItem.event
-            guard let blocker = adoptableBlockers.removeValue(forKey: blockerKey(for: event, rule: rule)) else {
+            guard let blocker = availableBlockers.removeValue(forKey: blockerKey(for: event, rule: rule)) else {
                 eventsToCreate.append(newItem)
                 continue
             }
-            let record = SyncRecord(
-                sourceEventIdentifier: event.eventIdentifier,
-                sourceExternalIdentifier: event.calendarItemExternalIdentifier,
-                sourceStartDate: event.startDate,
-                sourceEndDate: event.endDate,
-                sourceIsAllDay: event.isAllDay,
-                sourceContentHash: newItem.contentHash,
-                blockerEventIdentifier: blocker.eventIdentifier,
-                blockerExternalIdentifier: blocker.calendarItemExternalIdentifier,
-                lastSyncedAt: now
+            let record = Self.makeRecord(
+                source: event, blocker: blocker,
+                contentHash: newItem.contentHash, syncedAt: now
             )
             if blocker.notes == blockerNotes(for: event, rule: rule) {
-                createdRecords.append(record)
+                adoptedRecords.append(record)
             } else {
                 // Adopted blocker lacks up-to-date origins: refresh it below.
                 eventsToUpdate.append(ChangedEvent(
@@ -207,16 +241,52 @@ public final class SyncEngine {
         // ------------------------------------------------------------------
 
         var errors: [SyncError] = []
-        var updatedRecords: [SyncRecord] = []
         var removedChanges: [BlockerChange] = []
         var addedChanges: [BlockerChange] = []
         var updatedChanges: [BlockerChange] = []
+        var pendingAddedChanges: [BlockerChange] = []
+        var pendingUpdatedChanges: [BlockerChange] = []
+        var pendingRemovedChanges: [BlockerChange] = []
+        var commitOutcomeUncertain = false
+        var confirmedRecords = existingRecords
+        var pendingRecordChanges: [(id: String, record: SyncRecord?)] = adoptedRecords.map {
+            ($0.id, $0)
+        }
+        var pendingCalendarOperations = 0
+
+        func checkpoint() throws {
+            if pendingCalendarOperations > 0 {
+                try calendarService.commitChanges()
+                pendingCalendarOperations = 0
+            }
+            addedChanges.append(contentsOf: pendingAddedChanges)
+            updatedChanges.append(contentsOf: pendingUpdatedChanges)
+            removedChanges.append(contentsOf: pendingRemovedChanges)
+            pendingAddedChanges.removeAll()
+            pendingUpdatedChanges.removeAll()
+            pendingRemovedChanges.removeAll()
+            guard !pendingRecordChanges.isEmpty else { return }
+            for change in pendingRecordChanges {
+                if let record = change.record {
+                    if let index = confirmedRecords.firstIndex(where: { $0.id == change.id }) {
+                        confirmedRecords[index] = record
+                    } else {
+                        confirmedRecords.append(record)
+                    }
+                } else {
+                    confirmedRecords.removeAll { $0.id == change.id }
+                }
+            }
+            try syncRecordStore.saveRecords(confirmedRecords, for: rule.id)
+            pendingRecordChanges.removeAll()
+        }
 
         if !dryRun {
             var operationCount = 0
 
             // --- Create blockers for NEW events ---
             for newItem in eventsToCreate {
+                if commitOutcomeUncertain { break }
                 let event = newItem.event
                 do {
                     let blocker = try calendarService.createBlockerEvent(
@@ -229,48 +299,51 @@ public final class SyncEngine {
                         commit: false
                     )
 
-                    let record = SyncRecord(
-                        sourceEventIdentifier: event.eventIdentifier,
-                        sourceExternalIdentifier: event.calendarItemExternalIdentifier,
-                        sourceStartDate: event.startDate,
-                        sourceEndDate: event.endDate,
-                        sourceIsAllDay: event.isAllDay,
-                        sourceContentHash: newItem.contentHash,
-                        blockerEventIdentifier: blocker.eventIdentifier,
-                        blockerExternalIdentifier: blocker.calendarItemExternalIdentifier,
-                        lastSyncedAt: now
+                    let record = Self.makeRecord(
+                        source: event, blocker: blocker,
+                        contentHash: newItem.contentHash, syncedAt: now
                     )
 
-                    createdRecords.append(record)
-                    addedChanges.append(BlockerChange(
+                    pendingRecordChanges.append((record.id, record))
+                    pendingAddedChanges.append(BlockerChange(
                         startDate: event.startDate,
                         endDate: event.endDate,
                         isAllDay: event.isAllDay
                     ))
 
                     operationCount += 1
+                    pendingCalendarOperations += 1
                     if operationCount % Self.batchSize == 0 {
-                        try calendarService.commitChanges()
+                        do { try checkpoint() }
+                        catch {
+                            errors.append(SyncError(code: .eventKitInternal,
+                                message: "Batch commit or mapping checkpoint failed; stopping this sync: \(error.localizedDescription)"))
+                            commitOutcomeUncertain = true
+                            calendarService.discardPendingChanges()
+                        }
                     }
                 } catch {
                     errors.append(SyncError(
                         code: .blockerOperationFailed,
-                        message: "Failed to create blocker for source event \(event.eventIdentifier ?? "unknown"): \(error.localizedDescription)"
+                        message: "Failed to create blocker for source event \(event.identifier): \(error.localizedDescription)"
                     ))
                 }
             }
 
             // --- Update blockers for CHANGED events ---
             for changedItem in eventsToUpdate {
+                if commitOutcomeUncertain { break }
                 let event = changedItem.event
                 let existingRecord = changedItem.existingRecord
 
                 do {
                     // Look up the blocker event: primary identifier first, then external fallback.
-                    guard let blockerEvent = findBlockerEvent(for: existingRecord) else {
+                    guard case .found(let blockerEvent) = try calendarService.resolveBlocker(
+                        for: existingRecord, in: targetCalendar
+                    ) else {
                         errors.append(SyncError(
                             code: .blockerOperationFailed,
-                            message: "Blocker event not found for update (source: \(event.eventIdentifier ?? "unknown"))."
+                            message: "Blocker event not found for update (source: \(event.identifier))."
                         ))
                         continue
                     }
@@ -285,50 +358,73 @@ public final class SyncEngine {
                         commit: false
                     )
 
-                    let record = SyncRecord(
-                        sourceEventIdentifier: event.eventIdentifier,
-                        sourceExternalIdentifier: event.calendarItemExternalIdentifier,
-                        sourceStartDate: event.startDate,
-                        sourceEndDate: event.endDate,
-                        sourceIsAllDay: event.isAllDay,
-                        sourceContentHash: changedItem.contentHash,
-                        blockerEventIdentifier: blockerEvent.eventIdentifier,
-                        blockerExternalIdentifier: blockerEvent.calendarItemExternalIdentifier,
-                        lastSyncedAt: now
+                    let record = Self.makeRecord(
+                        source: event, blocker: blockerEvent,
+                        contentHash: changedItem.contentHash, syncedAt: now
                     )
 
-                    updatedRecords.append(record)
-                    updatedChanges.append(BlockerChange(
+                    pendingRecordChanges.append((record.id, record))
+                    pendingUpdatedChanges.append(BlockerChange(
                         startDate: event.startDate,
                         endDate: event.endDate,
                         isAllDay: event.isAllDay
                     ))
 
                     operationCount += 1
+                    pendingCalendarOperations += 1
                     if operationCount % Self.batchSize == 0 {
-                        try calendarService.commitChanges()
+                        do { try checkpoint() }
+                        catch {
+                            errors.append(SyncError(code: .eventKitInternal,
+                                message: "Batch commit or mapping checkpoint failed; stopping this sync: \(error.localizedDescription)"))
+                            commitOutcomeUncertain = true
+                            calendarService.discardPendingChanges()
+                        }
                     }
                 } catch {
                     errors.append(SyncError(
                         code: .blockerOperationFailed,
-                        message: "Failed to update blocker for source event \(event.eventIdentifier ?? "unknown"): \(error.localizedDescription)"
+                        message: "Failed to update blocker for source event \(event.identifier): \(error.localizedDescription)"
                     ))
                 }
             }
 
             // --- Delete blockers for ORPHANED records ---
             for orphanedRecord in diffResult.orphanedRecords {
+                if commitOutcomeUncertain { break }
                 do {
-                    if let blockerEvent = findBlockerEvent(for: orphanedRecord) {
+                    switch try calendarService.resolveBlocker(for: orphanedRecord, in: targetCalendar) {
+                    case .found(let blockerEvent):
                         try calendarService.deleteEvent(blockerEvent, commit: false)
+                        pendingRecordChanges.append((orphanedRecord.id, nil))
 
                         operationCount += 1
+                        pendingCalendarOperations += 1
                         if operationCount % Self.batchSize == 0 {
-                            try calendarService.commitChanges()
+                            do { try checkpoint() }
+                            catch {
+                                errors.append(SyncError(code: .eventKitInternal,
+                                    message: "Batch commit or mapping checkpoint failed; stopping this sync: \(error.localizedDescription)"))
+                                commitOutcomeUncertain = true
+                                calendarService.discardPendingChanges()
+                            }
                         }
+                    case .missing:
+                        pendingRecordChanges.append((orphanedRecord.id, nil))
+                        pendingRemovedChanges.append(BlockerChange(
+                            startDate: orphanedRecord.sourceStartDate,
+                            endDate: orphanedRecord.sourceEndDate,
+                            isAllDay: orphanedRecord.sourceIsAllDay
+                        ))
+                    case .foreign, .untagged, .ambiguous:
+                        errors.append(SyncError(
+                            code: .blockerOperationFailed,
+                            message: "Refused to delete an orphaned blocker because its ownership could not be verified."
+                        ))
+                        continue
                     }
 
-                    removedChanges.append(BlockerChange(
+                    pendingRemovedChanges.append(BlockerChange(
                         startDate: orphanedRecord.sourceStartDate,
                         endDate: orphanedRecord.sourceEndDate,
                         isAllDay: orphanedRecord.sourceIsAllDay
@@ -341,14 +437,17 @@ public final class SyncEngine {
                 }
             }
 
-            // --- Final commit for any remaining uncommitted operations ---
-            if operationCount % Self.batchSize != 0 {
+            // --- Final commit and mapping checkpoint for remaining work ---
+            if !commitOutcomeUncertain
+                && (pendingCalendarOperations > 0 || !pendingRecordChanges.isEmpty) {
                 do {
-                    try calendarService.commitChanges()
+                    try checkpoint()
                 } catch {
+                    commitOutcomeUncertain = true
+                    calendarService.discardPendingChanges()
                     errors.append(SyncError(
                         code: .eventKitInternal,
-                        message: "Final commit failed: \(error.localizedDescription)"
+                        message: "Final commit or mapping checkpoint failed: \(error.localizedDescription)"
                     ))
                 }
             }
@@ -381,23 +480,8 @@ public final class SyncEngine {
         // Step 7: Build updated records list and persist
         // ------------------------------------------------------------------
 
-        // Combine: new records + updated records + unchanged records.
-        // Orphaned records are excluded since their blockers were deleted.
-        var finalRecords: [SyncRecord] = []
-        finalRecords.append(contentsOf: createdRecords)
-        finalRecords.append(contentsOf: updatedRecords)
-        finalRecords.append(contentsOf: diffResult.unchangedRecords)
-
-        if !dryRun {
-            do {
-                try syncRecordStore.saveRecords(finalRecords, for: rule.id)
-            } catch {
-                errors.append(SyncError(
-                    code: .unknown,
-                    message: "Failed to save sync records: \(error.localizedDescription)"
-                ))
-            }
-        }
+        // Mappings are checkpointed only after their matching calendar batch
+        // commits. If a later batch fails, earlier confirmed checkpoints remain.
 
         // ------------------------------------------------------------------
         // Step 8: Build and persist the sync log
@@ -405,7 +489,7 @@ public final class SyncEngine {
 
         let duration = Date().timeIntervalSince(startTime)
 
-        let syncLog = SyncLog(
+        var syncLog = SyncLog(
             ruleId: rule.id,
             timestamp: startTime,
             durationSeconds: duration,
@@ -419,13 +503,17 @@ public final class SyncEngine {
             do {
                 try syncLogStore.appendLog(syncLog)
             } catch {
-                // Log persistence failure is non-fatal; the sync itself succeeded.
-                // The error is already captured in the returned SyncLog via the errors array
-                // if we wanted, but since the log object is already built, we silently
-                // accept this failure. The next successful appendLog will prune old entries.
+                errors.append(SyncError(
+                    code: .unknown,
+                    message: "Calendar sync finished, but activity could not be saved: \(error.localizedDescription)"
+                ))
+                syncLog = SyncLog(ruleId: rule.id, timestamp: startTime,
+                    durationSeconds: duration, added: addedChanges,
+                    removed: removedChanges, updated: updatedChanges, errors: errors)
             }
         }
 
+        calendarService.releaseEventHandles()
         return syncLog
     }
 
@@ -448,12 +536,12 @@ public final class SyncEngine {
 
     /// Intermediate types used during the diff phase to classify source events.
     private struct NewEvent {
-        let event: EKEvent
+        let event: CalendarEventSnapshot
         let contentHash: String
     }
 
     private struct ChangedEvent {
-        let event: EKEvent
+        let event: CalendarEventSnapshot
         let contentHash: String
         let existingRecord: SyncRecord
     }
@@ -482,90 +570,55 @@ public final class SyncEngine {
     ///   - existingRecords: Previously persisted sync records for this rule.
     /// - Returns: A `DiffResult` classifying each event and record.
     private func computeDiff(
-        sourceEvents: [EKEvent],
+        sourceEvents: [CalendarEventSnapshot],
         existingRecords: [SyncRecord],
         rule: MirrorRule
     ) -> DiffResult {
-        // Build a lookup by the composite record ID to handle recurring occurrences.
-        // Record.id = "{sourceEventIdentifier}_{sourceStartDate.timeIntervalSince1970}"
-        var recordLookup: [String: SyncRecord] = [:]
-        for record in existingRecords {
-            recordLookup[record.id] = record
-        }
-
-        // Pair each event with its blocker content hash and record key.
-        // Build the same composite key that SyncRecord.id uses.
-        let candidates = sourceEvents.map { event in
-            (
-                event: event,
-                contentHash: ContentHasher.computeContentHash(
-                    startDate: event.startDate,
-                    endDate: event.endDate,
-                    isAllDay: event.isAllDay,
-                    blockerTitle: rule.blockerTitle(forSourceTitle: event.title),
-                    origins: BlockerNotes.originsForBlocker(
-                        sourceNotes: event.notes,
-                        sourceCalendarIdentifier: rule.sourceCalendarIdentifier
-                    )
-                ),
-                compositeKey: "\(event.eventIdentifier ?? "")_\(Int(event.startDate.timeIntervalSince1970))"
-            )
-        }
-
-        // Source events that would produce the very same blocker (same title
-        // and time) are mirrored once. Records of dropped duplicates end up
-        // orphaned below, which removes their redundant blockers.
-        let uniqueCandidates = BlockerDeduplicator.collapseDuplicates(
-            candidates,
-            blockerKey: { blockerKey(for: $0.event, rule: rule) },
-            isAlreadyMirrored: { recordLookup[$0.compositeKey] != nil }
+        let plan = SyncPlanner.plan(
+            sourceEvents: sourceEvents.map { event in
+                SourceEventSnapshot(identifier: event.identifier, title: event.title,
+                                    startDate: event.startDate, endDate: event.endDate,
+                                    isAllDay: event.isAllDay, notes: event.notes)
+            },
+            existingRecords: existingRecords,
+            rule: rule
         )
-
-        var newEvents: [NewEvent] = []
-        var changedEvents: [ChangedEvent] = []
-        var matchedRecordIds: Set<String> = []
-
-        for (event, contentHash, compositeKey) in uniqueCandidates {
-            if let existingRecord = recordLookup[compositeKey] {
-                matchedRecordIds.insert(compositeKey)
-
-                if existingRecord.sourceContentHash == contentHash {
-                    // UNCHANGED — hash matches, no action needed.
-                } else {
-                    // CHANGED — hash differs, blocker must be updated.
-                    changedEvents.append(ChangedEvent(
-                        event: event,
-                        contentHash: contentHash,
-                        existingRecord: existingRecord
-                    ))
-                }
-            } else {
-                // NEW — no existing record, blocker must be created.
-                newEvents.append(NewEvent(event: event, contentHash: contentHash))
-            }
-        }
-
-        // Records not matched by any source event are orphaned.
-        let orphanedRecords = existingRecords.filter { !matchedRecordIds.contains($0.id) }
-
-        // Unchanged records are matched records that were not classified as changed.
-        let changedRecordIds = Set(changedEvents.map { $0.existingRecord.id })
-        let unchangedRecords = existingRecords.filter {
-            matchedRecordIds.contains($0.id) && !changedRecordIds.contains($0.id)
-        }
-
+        // EventKit objects stay in the imperative engine. The planner only
+        // returns indexes into this immutable snapshot of the source list.
         return DiffResult(
-            newEvents: newEvents,
-            changedEvents: changedEvents,
-            orphanedRecords: orphanedRecords,
-            unchangedRecords: unchangedRecords
+            newEvents: plan.newEvents.map {
+                NewEvent(event: sourceEvents[$0.sourceIndex], contentHash: $0.contentHash)
+            },
+            changedEvents: plan.changedEvents.map {
+                ChangedEvent(event: sourceEvents[$0.source.sourceIndex],
+                             contentHash: $0.source.contentHash, existingRecord: $0.existingRecord)
+            },
+            orphanedRecords: plan.orphanedRecords,
+            unchangedRecords: plan.unchangedRecords
         )
     }
 
     // MARK: - Private Helpers
 
+    /// Builds the same persisted mapping after adoption, creation or update.
+    private static func makeRecord(
+        source: CalendarEventSnapshot, blocker: CalendarEventSnapshot, contentHash: String, syncedAt: Date
+    ) -> SyncRecord {
+        SyncRecord(
+            sourceEventIdentifier: source.identifier,
+            sourceExternalIdentifier: source.externalIdentifier,
+            sourceStartDate: source.startDate,
+            sourceEndDate: source.endDate,
+            sourceIsAllDay: source.isAllDay,
+            sourceContentHash: contentHash,
+            blockerEventIdentifier: blocker.identifier,
+            blockerExternalIdentifier: blocker.externalIdentifier,
+            lastSyncedAt: syncedAt
+        )
+    }
+
     /// Returns the title-and-time identity of the blocker mirroring a source event.
-    private func blockerKey(for event: EKEvent, rule: MirrorRule) -> BlockerKey {
+    private func blockerKey(for event: CalendarEventSnapshot, rule: MirrorRule) -> BlockerKey {
         BlockerKey(
             title: rule.blockerTitle(forSourceTitle: event.title),
             startDate: event.startDate,
@@ -576,7 +629,7 @@ public final class SyncEngine {
 
     /// Returns the managed notes (tag + origin calendar chain) of the blocker
     /// mirroring a source event.
-    private func blockerNotes(for event: EKEvent, rule: MirrorRule) -> String {
+    private func blockerNotes(for event: CalendarEventSnapshot, rule: MirrorRule) -> String {
         BlockerNotes.compose(origins: BlockerNotes.originsForBlocker(
             sourceNotes: event.notes,
             sourceCalendarIdentifier: rule.sourceCalendarIdentifier
@@ -601,20 +654,27 @@ public final class SyncEngine {
     ///   - existingRecords: The rule's persisted sync records.
     /// - Returns: Adoptable blocker events keyed by their title and time.
     private func findAdoptableBlockers(
-        in calendar: EKCalendar,
+        in calendar: CalendarDescriptor,
         from startDate: Date,
         to endDate: Date,
-        existingRecords: [SyncRecord]
-    ) -> [BlockerKey: EKEvent] {
+        existingRecords: [SyncRecord],
+        rule: MirrorRule,
+        otherOwners: (local: Set<String>, external: Set<String>)
+    ) throws -> [BlockerKey: CalendarEventSnapshot] {
         let claimedIdentifiers = Set(existingRecords.map(\.blockerEventIdentifier))
         let claimedExternalIdentifiers = Set(existingRecords.map(\.blockerExternalIdentifier))
 
-        var adoptable: [BlockerKey: EKEvent] = [:]
-        for event in calendarService.fetchEvents(in: calendar, from: startDate, to: endDate) {
+        var adoptable: [BlockerKey: CalendarEventSnapshot] = [:]
+        for event in try calendarService.fetchEvents(in: calendar, from: startDate, to: endDate, retainHandles: true) {
             guard BlockerNotes.isManaged(event.notes),
-                  !claimedIdentifiers.contains(event.eventIdentifier ?? ""),
-                  !claimedExternalIdentifiers.contains(event.calendarItemExternalIdentifier ?? "")
+                  !claimedIdentifiers.contains(event.identifier),
+                  !claimedExternalIdentifiers.contains(event.externalIdentifier),
+                  !otherOwners.local.contains(event.identifier),
+                  !otherOwners.external.contains(event.externalIdentifier)
             else { continue }
+
+            let knownOrigins = BlockerNotes.origins(fromNotes: event.notes)
+            guard knownOrigins.isEmpty || knownOrigins.contains(rule.sourceCalendarIdentifier) else { continue }
 
             let key = BlockerKey(
                 title: event.title ?? "",
@@ -630,35 +690,7 @@ public final class SyncEngine {
         return adoptable
     }
 
-    /// Looks up a blocker event using the sync record's stored identifiers.
-    ///
-    /// Attempts the primary device-local `eventIdentifier` first. If not found
-    /// (e.g., after Exchange re-sync), falls back to the cross-device
-    /// `calendarItemExternalIdentifier`.
-    ///
-    /// - Parameter record: The sync record containing the blocker's identifiers.
-    /// - Returns: The matching `EKEvent`, or `nil` if the blocker no longer exists.
-    private func findBlockerEvent(for record: SyncRecord) -> EKEvent? {
-        // Primary lookup: device-local identifier (fast, single-item fetch).
-        if let event = calendarService.findEvent(byIdentifier: record.blockerEventIdentifier) {
-            return event
-        }
-
-        // Fallback: cross-device external identifier (may return multiple items).
-        let items = calendarService.findEvents(byExternalIdentifier: record.blockerExternalIdentifier)
-        return items.first { $0 is EKEvent } as? EKEvent
-    }
-
-    /// Builds a `SyncLog` containing a single error for early-exit scenarios.
-    ///
-    /// Used when calendar validation fails and no sync operations can be performed.
-    /// The log is persisted and returned so the UI can display the failure reason.
-    ///
-    /// - Parameters:
-    ///   - rule: The mirror rule that failed validation.
-    ///   - startTime: The timestamp when sync execution began.
-    ///   - error: The validation error to include in the log.
-    /// - Returns: A `SyncLog` with no changes and the provided error.
+    /// Records an early calendar-validation failure using the existing logging policy.
     private func buildErrorLog(rule: MirrorRule, startTime: Date, error: SyncError) -> SyncLog {
         let duration = Date().timeIntervalSince(startTime)
 
