@@ -69,6 +69,7 @@ struct RulesListView: View {
                     Picker("Show rules", selection: $filter) {
                         ForEach(["All", "Active", "Paused"], id: \.self) { Text($0).tag($0) }
                     }
+                    .labelsHidden()
                     .pickerStyle(.segmented).frame(width: 200)
                 }
             }
