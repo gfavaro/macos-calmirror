@@ -10,6 +10,13 @@
 #   ./scripts/install.sh --app    # Install GUI app only
 #   ./scripts/install.sh --cli    # Install CLI + launchd agent only
 #
+# Calendar permission persistence:
+#   By default the app is signed ad-hoc, so macOS sees every rebuild as a new
+#   app and asks for Calendar access again. Set CODESIGN_IDENTITY to a stable
+#   signing identity (list them with `security find-identity -v -p codesigning`)
+#   and the permission survives reinstalls:
+#     CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/install.sh
+#
 # Installed locations:
 #   GUI app:       /Applications/CalMirror.app
 #   CLI binary:    /usr/local/bin/calmirror
@@ -25,6 +32,8 @@ APP_DEST="/Applications/${APP_NAME}.app"
 CLI_DEST="/usr/local/bin/calmirror"
 AGENT_LABEL="com.gravitek.calmirror.sync"
 AGENT_DEST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
+# "-" is an ad-hoc signature; a real identity keeps macOS privacy grants stable.
+SIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 # Determine what to install
 INSTALL_APP=true
@@ -68,8 +77,8 @@ if $INSTALL_APP; then
     # Copy the app icon (referenced by CFBundleIconFile in Info.plist)
     cp "${PROJECT_DIR}/Resources/AppIcon.icns" "${APP_DEST}/Contents/Resources/AppIcon.icns"
 
-    # Ad-hoc code sign so macOS accepts the bundle
-    codesign --force --sign - "${APP_DEST}"
+    # Code sign so macOS accepts the bundle (ad-hoc unless CODESIGN_IDENTITY is set)
+    codesign --force --sign "$SIGN_IDENTITY" "${APP_DEST}"
 
     echo "    Installed: ${APP_DEST}"
 fi
@@ -85,6 +94,12 @@ if $INSTALL_CLI; then
     if [[ ! -d /usr/local/bin ]]; then
         echo "    Creating /usr/local/bin (requires sudo)..."
         sudo mkdir -p /usr/local/bin
+    fi
+
+    # With a real identity, sign the CLI under a stable identifier so its
+    # Calendar permission also survives rebuilds.
+    if [[ "$SIGN_IDENTITY" != "-" ]]; then
+        codesign --force --sign "$SIGN_IDENTITY" --identifier "${BUNDLE_ID}.cli" "${BUILD_DIR}/calmirror"
     fi
 
     # Copy binary (may require sudo depending on permissions)
