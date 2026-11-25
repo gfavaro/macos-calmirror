@@ -1,8 +1,16 @@
 # CalMirror
 
-[![CI](https://github.com/gravitek-io/macos-calmirror/actions/workflows/ci.yml/badge.svg)](https://github.com/gravitek-io/macos-calmirror/actions/workflows/ci.yml)
+[![CI](https://github.com/gfavaro/macos-calmirror/actions/workflows/ci.yml/badge.svg)](https://github.com/gfavaro/macos-calmirror/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 ![Platform: macOS 26+](https://img.shields.io/badge/platform-macOS%2026%2B-lightgrey.svg)
+
+> **This is an independent fork.** It is maintained at
+> [gfavaro/macos-calmirror](https://github.com/gfavaro/macos-calmirror) and is
+> **not attached to the original project** ([gravitek-io/macos-calmirror](https://github.com/gravitek-io/macos-calmirror)).
+> It has its own `main`, releases, roadmap and release cadence, and it does
+> not track, wait for or depend on upstream changes. Some changes may be
+> offered upstream as optional contributions; see
+> [docs/CONTRIBUTION_MAP.md](docs/CONTRIBUTION_MAP.md).
 
 CalMirror is a small native macOS app that makes your real availability
 visible across calendar accounts. It reads the events of one calendar and
@@ -161,7 +169,7 @@ option existed keep using their fixed label.
 ### From a release archive (recommended)
 
 1. Download `calmirror-X.Y.Z-macos-arm64.tar.gz` from the
-   [latest release](https://github.com/gravitek-io/macos-calmirror/releases/latest).
+   [latest release](https://github.com/gfavaro/macos-calmirror/releases/latest).
 2. Extract it and run the bundled installer:
 
 ```bash
@@ -177,7 +185,7 @@ Open Anyway**, or right-click the app and choose **Open**.
 ### From source
 
 ```bash
-git clone https://github.com/gravitek-io/macos-calmirror.git
+git clone https://github.com/gfavaro/macos-calmirror.git
 cd macos-calmirror
 ./scripts/install.sh
 ```

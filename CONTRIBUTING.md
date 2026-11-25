@@ -1,5 +1,10 @@
 # Contributing to CalMirror
 
+> This repository is an independent fork of
+> [gravitek-io/macos-calmirror](https://github.com/gravitek-io/macos-calmirror)
+> and is not attached to it. Issues and pull requests here are handled by this
+> fork's maintainer; upstream is a separate project with its own process.
+
 Thanks for taking the time to contribute. CalMirror is a small project and
 every kind of help matters: bug reports, testing with a calendar provider we
 have not tried, documentation fixes, or code.
@@ -28,7 +33,7 @@ have not tried, documentation fixes, or code.
 | Calendar accounts | at least two calendars configured in Apple Calendar |
 
 ```bash
-git clone https://github.com/gravitek-io/macos-calmirror.git
+git clone https://github.com/gfavaro/macos-calmirror.git
 cd macos-calmirror
 
 swift build              # build every target

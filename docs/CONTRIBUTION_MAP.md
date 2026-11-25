@@ -1,8 +1,10 @@
 # Contribution map
 
-The fork contains the complete integrated app on `main`. It builds and runs
-without waiting for upstream changes. The PRs below are optional contributions
-to `gravitek-io/macos-calmirror:main`. They are ready for review.
+This repository is an independent fork and is not attached to upstream. Its
+`main` contains the complete integrated app. It builds, releases and evolves
+without waiting for, tracking or depending on upstream changes. The PRs below
+are optional contributions to `gravitek-io/macos-calmirror:main`. They are
+ready for review.
 
 | Change | Request | Draft PR | Local validation |
 |---|---|---|---|

@@ -86,7 +86,7 @@ the archive with `scripts/package-release.sh`, and creates a **draft** release
 Follow it from the Actions tab or with:
 
 ```bash
-gh run list --workflow Release -R gravitek-io/macos-calmirror
+gh run list --workflow Release -R gfavaro/macos-calmirror
 ```
 
 If it fails, fix the cause, delete the tag locally and remotely
@@ -96,16 +96,16 @@ release already exists; delete the draft first.
 
 ## 4. Review and publish
 
-Open the draft on the [releases page](https://github.com/gravitek-io/macos-calmirror/releases)
+Open the draft on the [releases page](https://github.com/gfavaro/macos-calmirror/releases)
 and edit the generated notes to match the structure of previous releases: a
 one-line summary, a "What's new" list, an Installation block, and a compare
-link (`https://github.com/gravitek-io/macos-calmirror/compare/v<prev>...vX.Y.Z`).
+link (`https://github.com/gfavaro/macos-calmirror/compare/v<prev>...vX.Y.Z`).
 Then publish.
 
 ## 5. Verify
 
 ```bash
-gh release view vX.Y.Z -R gravitek-io/macos-calmirror
+gh release view vX.Y.Z -R gfavaro/macos-calmirror
 ```
 
 Confirm the asset is attached and, ideally, download it on a clean machine and
