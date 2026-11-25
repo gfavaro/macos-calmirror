@@ -102,7 +102,7 @@ extension CalmMirror.Rules {
             // Header
             print(formatRow([
                 ("ID", 10), ("TITLE", 24), ("SOURCE", 10),
-                ("TARGET", 10), ("WINDOW", 8), ("MODE", 8), ("CHAIN", 8), ("STATUS", 0)
+                ("TARGET", 10), ("WINDOW", 8), ("MODE", 8), ("CHAIN", 8), ("DAYS", 24), ("STATUS", 0)
             ]))
 
             for rule in rules {
@@ -114,6 +114,7 @@ extension CalmMirror.Rules {
                     ("\(rule.windowDays)d", 8),
                     (rule.usePlaceholder ? "fixed" : "source", 8),
                     (rule.allowChaining ? "on" : "off", 8),
+                    (rule.weekdaySummary, 24),
                     (rule.isEnabled ? "enabled" : "disabled", 0)
                 ]))
             }
@@ -191,6 +192,9 @@ extension CalmMirror.Rules {
         @Flag(name: .long, help: "Include CalMirror-generated blocks as sources, allowing rules to chain")
         var allowChaining: Bool = false
 
+        @Option(name: .long, help: "Weekdays to sync, e.g. mon,wed,fri (also: weekdays, weekends, all). Default: all")
+        var weekdays: String = "all"
+
         @Option(name: .long, help: "Fixed label for blocker events (required with --use-placeholder; ignored otherwise)")
         var label: String = ""
 
@@ -233,6 +237,11 @@ extension CalmMirror.Rules {
                 Darwin.exit(3)
             }
 
+            guard let selectedWeekdays = MirrorRule.parseWeekdays(weekdays) else {
+                writeToStderr("error: --weekdays must be a comma-separated list such as mon,wed,fri.")
+                Darwin.exit(3)
+            }
+
             // Validate label is not empty when the placeholder is in use.
             if usePlaceholder && label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 writeToStderr("error: --label must not be empty when --use-placeholder is set.")
@@ -247,7 +256,8 @@ extension CalmMirror.Rules {
                 windowDays: window,
                 blockerLabel: label,
                 usePlaceholder: usePlaceholder,
-                allowChaining: allowChaining
+                allowChaining: allowChaining,
+                weekdays: selectedWeekdays
             )
 
             let store = RuleStore()
@@ -268,6 +278,7 @@ extension CalmMirror.Rules {
             print("  Target: \(targetCal.title) (\(targetAccount))")
             print("  Window: \(window) days")
             print("  Chaining: \(allowChaining ? "on" : "off")")
+            print("  Days:   \(rule.weekdaySummary)")
             if usePlaceholder {
                 print("  Title mode: fixed placeholder")
                 print("  Label:  \(label)")

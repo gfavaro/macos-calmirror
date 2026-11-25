@@ -162,7 +162,8 @@ struct RulesListView: View {
                  targetAccount: target?.source?.title ?? "Check calendar access",
                  targetColor: calendarColor(target),
                  days: rule.windowDays, isEnabled: rule.isEnabled,
-                 isPrivate: rule.usePlaceholder, allowsChaining: rule.allowChaining) {
+                 isPrivate: rule.usePlaceholder, allowsChaining: rule.allowChaining,
+                 weekdaySummary: rule.weekdaySummary) {
             Toggle("Enable \(rule.title)", isOn: toggleBinding(for: rule))
                 .toggleStyle(.switch).controlSize(.small).labelsHidden()
             Menu {

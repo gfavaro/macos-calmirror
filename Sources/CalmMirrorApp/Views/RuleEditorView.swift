@@ -76,6 +76,9 @@ struct RuleEditorView: View {
     @State private var usePlaceholder: Bool = false
     @State private var allowChaining: Bool = false
 
+    /// Weekdays on which events are mirrored (`Calendar` numbering, 1 = Sunday).
+    @State private var weekdays: Set<Int> = MirrorRule.allWeekdays
+
     // MARK: - Calendar Data
 
     /// All calendars grouped by account, fetched on appear.
@@ -123,6 +126,7 @@ struct RuleEditorView: View {
             _blockerLabel = State(initialValue: rule.blockerLabel)
             _usePlaceholder = State(initialValue: rule.usePlaceholder)
             _allowChaining = State(initialValue: rule.allowChaining)
+            _weekdays = State(initialValue: rule.weekdays)
         }
     }
 
@@ -170,6 +174,12 @@ struct RuleEditorView: View {
         return "\(prefix) <event name>"
     }
 
+    /// Weekday numbers in the user's locale order (e.g. Monday first).
+    private var orderedWeekdays: [Int] {
+        let first = Calendar.current.firstWeekday
+        return (0..<7).map { (first - 1 + $0) % 7 + 1 }
+    }
+
     /// Whether all form fields pass validation and the form can be saved.
     /// The label is only required when the placeholder is in use.
     private var isFormValid: Bool {
@@ -179,6 +189,7 @@ struct RuleEditorView: View {
             && !isSelfMirroring
             && (!usePlaceholder || !isLabelEmpty)
             && (1...120).contains(windowDays)
+            && !weekdays.isEmpty
     }
 
     /// Writable calendars flattened for the target picker, excluding the
@@ -334,6 +345,29 @@ struct RuleEditorView: View {
 
         }
 
+        Section("Days to sync") {
+            HStack(spacing: 6) {
+                ForEach(orderedWeekdays, id: \.self) { day in
+                    Toggle(Calendar.current.shortWeekdaySymbols[day - 1], isOn: Binding(
+                        get: { weekdays.contains(day) },
+                        set: { isOn in
+                            if isOn { weekdays.insert(day) } else { weekdays.remove(day) }
+                        }
+                    ))
+                    .toggleStyle(.button)
+                }
+            }
+            if weekdays.isEmpty {
+                Text(MirrorRule.ValidationError.invalidWeekdays.localizedDescription)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            } else {
+                Text("Only events that start on the selected days are mirrored. Existing blockers on other days are removed on the next sync.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
         Section("Event privacy") {
             Toggle("Use a fixed placeholder", isOn: $usePlaceholder)
                 .onChange(of: usePlaceholder) { _, isOn in
@@ -423,6 +457,7 @@ struct RuleEditorView: View {
             updated.blockerLabel = blockerLabel
             updated.usePlaceholder = usePlaceholder
             updated.allowChaining = allowChaining
+            updated.weekdays = weekdays
             updated.updatedAt = Date()
 
             // Source and target are immutable (let properties), so they cannot
@@ -453,7 +488,8 @@ struct RuleEditorView: View {
                 windowDays: windowDays,
                 blockerLabel: blockerLabel,
                 usePlaceholder: usePlaceholder,
-                allowChaining: allowChaining
+                allowChaining: allowChaining,
+                weekdays: weekdays
             )
 
             do {

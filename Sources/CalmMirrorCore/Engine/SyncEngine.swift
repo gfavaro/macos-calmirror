@@ -142,9 +142,12 @@ public final class SyncEngine {
         }
 
         // Filtering before diffing also removes previously chained copies when
-        // chaining is disabled: their records become orphaned and are cleaned up.
+        // chaining is disabled or their weekday is deselected: their records
+        // become orphaned and are cleaned up.
         let sourceEvents = allSourceEvents.filter { event in
-            !event.isCanceled && rule.acceptsSource(notes: event.notes)
+            !event.isCanceled
+                && rule.acceptsWeekday(of: event.startDate, calendar: calendar)
+                && rule.acceptsSource(notes: event.notes)
         }
 
         // ------------------------------------------------------------------

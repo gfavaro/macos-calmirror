@@ -13,6 +13,9 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
     /// UserDefaults key used to persist the array of mirror rules.
     public static let userDefaultsKey = "mirrorRules"
 
+    /// Every weekday, using `Calendar` numbering (1 = Sunday ... 7 = Saturday).
+    public static let allWeekdays: Set<Int> = Set(1...7)
+
     // MARK: - Validation
 
     /// Errors that can occur when validating a mirror rule's configuration.
@@ -25,6 +28,8 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         case emptyLabel
         /// The rule title cannot be empty or whitespace-only.
         case emptyTitle
+        /// At least one weekday must be selected, using values 1...7.
+        case invalidWeekdays
 
         public var errorDescription: String? {
             switch self {
@@ -36,6 +41,8 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
                 return "Blocker label must not be empty."
             case .emptyTitle:
                 return "Rule title must not be empty."
+            case .invalidWeekdays:
+                return "Select at least one weekday to sync."
             }
         }
     }
@@ -78,6 +85,11 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
     ///   existed, preserving their original privacy behavior.
     public var usePlaceholder: Bool
 
+    /// Weekdays on which source events are mirrored, using `Calendar` numbering
+    /// (1 = Sunday ... 7 = Saturday). An event belongs to the weekday on which
+    /// it starts. Defaults to every day.
+    public var weekdays: Set<Int>
+
     /// Include CalMirror-generated blockers as sources, allowing rules to chain.
     public var allowChaining: Bool
 
@@ -103,6 +115,7 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         blockerLabel: String,
         usePlaceholder: Bool,
         allowChaining: Bool = false,
+        weekdays: Set<Int> = MirrorRule.allWeekdays,
         isEnabled: Bool,
         createdAt: Date,
         updatedAt: Date
@@ -115,6 +128,7 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         self.blockerLabel = blockerLabel
         self.usePlaceholder = usePlaceholder
         self.allowChaining = allowChaining
+        self.weekdays = weekdays
         self.isEnabled = isEnabled
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -138,7 +152,8 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         windowDays: Int,
         blockerLabel: String,
         usePlaceholder: Bool = false,
-        allowChaining: Bool = false
+        allowChaining: Bool = false,
+        weekdays: Set<Int> = MirrorRule.allWeekdays
     ) {
         let now = Date()
         self.init(
@@ -150,10 +165,50 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
             blockerLabel: blockerLabel,
             usePlaceholder: usePlaceholder,
             allowChaining: allowChaining,
+            weekdays: weekdays,
             isEnabled: true,
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    /// Parses a comma-separated weekday list such as "mon,wed,fri" (case-insensitive;
+    /// full names, three-letter names, "weekdays", "weekends" and "all" are accepted).
+    /// Returns `nil` when any token is not recognised or the list is empty.
+    public static func parseWeekdays(_ text: String) -> Set<Int>? {
+        let names = ["sun": 1, "mon": 2, "tue": 3, "wed": 4, "thu": 5, "fri": 6, "sat": 7]
+        var result = Set<Int>()
+        let tokens = text.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        guard !tokens.isEmpty else { return nil }
+        for token in tokens {
+            switch token {
+            case "all": result.formUnion(allWeekdays)
+            case "weekdays": result.formUnion(2...6)
+            case "weekends": result.formUnion([1, 7])
+            default:
+                guard let day = names[String(token.prefix(3))], token.count >= 3 else { return nil }
+                result.insert(day)
+            }
+        }
+        return result
+    }
+
+    /// Short human-readable summary, e.g. "Every day" or "Mon, Wed, Fri".
+    public var weekdaySummary: String {
+        if weekdays == MirrorRule.allWeekdays { return "Every day" }
+        let symbols = Calendar.current.shortWeekdaySymbols
+        let first = Calendar.current.firstWeekday
+        return (0..<7).map { (first - 1 + $0) % 7 + 1 }
+            .filter { weekdays.contains($0) }
+            .map { symbols[$0 - 1] }
+            .joined(separator: ", ")
+    }
+
+    /// Whether an event starting at `start` falls on one of the rule's weekdays.
+    func acceptsWeekday(of start: Date, calendar: Calendar = .current) -> Bool {
+        weekdays.contains(calendar.component(.weekday, from: start))
     }
 
     /// Applies the rule's source policy while retaining loop protection in chaining mode.
@@ -196,7 +251,7 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
     /// `title` defaults to `blockerLabel` so legacy rules remain usable.
     private enum CodingKeys: String, CodingKey {
         case id, title, sourceCalendarIdentifier, targetCalendarIdentifier
-        case windowDays, blockerLabel, usePlaceholder, allowChaining, isEnabled, createdAt, updatedAt
+        case windowDays, blockerLabel, usePlaceholder, allowChaining, weekdays, isEnabled, createdAt, updatedAt
     }
 
     /// Decodes a `MirrorRule` from JSON, falling back to `blockerLabel` for
@@ -215,6 +270,8 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         title = try container.decodeIfPresent(String.self, forKey: .title) ?? blockerLabel
         // Existing rules retain their previous chaining behavior until explicitly edited.
         allowChaining = try container.decodeIfPresent(Bool.self, forKey: .allowChaining) ?? true
+        // Rules saved before weekday selection keep mirroring every day.
+        weekdays = try container.decodeIfPresent(Set<Int>.self, forKey: .weekdays) ?? MirrorRule.allWeekdays
         // Preserve the static-label behavior of older rules.
         usePlaceholder = try container.decodeIfPresent(Bool.self, forKey: .usePlaceholder) ?? true
     }
@@ -242,7 +299,8 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         targetCalendarIdentifier: String,
         windowDays: Int,
         blockerLabel: String,
-        usePlaceholder: Bool
+        usePlaceholder: Bool,
+        weekdays: Set<Int> = MirrorRule.allWeekdays
     ) -> ValidationError? {
         if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .emptyTitle
@@ -252,6 +310,9 @@ public struct MirrorRule: Codable, Identifiable, Hashable, Sendable {
         }
         if !(1...120).contains(windowDays) {
             return .windowOutOfRange
+        }
+        if weekdays.isEmpty || !weekdays.isSubset(of: MirrorRule.allWeekdays) {
+            return .invalidWeekdays
         }
         // The static label is only meaningful when the placeholder is in use.
         if usePlaceholder && blockerLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

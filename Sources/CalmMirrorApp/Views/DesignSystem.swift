@@ -60,6 +60,7 @@ struct RuleCard<Actions: View, Status: View>: View {
     let isEnabled: Bool
     let isPrivate: Bool
     let allowsChaining: Bool
+    var weekdaySummary: String = "Every day"
     @ViewBuilder var actions: () -> Actions
     @ViewBuilder var status: () -> Status
 
@@ -83,6 +84,9 @@ struct RuleCard<Actions: View, Status: View>: View {
             .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
             HStack(spacing: 6) {
                 StatusPill(title: "\(days) days", symbol: "calendar")
+                if weekdaySummary != "Every day" {
+                    StatusPill(title: weekdaySummary, symbol: "calendar.badge.clock")
+                }
                 StatusPill(title: isPrivate ? "Busy only" : "Event titles",
                            symbol: isPrivate ? "lock" : "text.alignleft")
                 if allowsChaining {
